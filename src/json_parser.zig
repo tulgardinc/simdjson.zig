@@ -150,25 +150,3 @@ test "simd" {
         std.debug.print("key: {s}, val: {s}\n", .{ field.name, @field(deser_struct, field.name).slice() });
     }
 }
-
-const Test = struct {
-    field: []const u8,
-};
-
-pub fn nice() !void {
-    const fields = @typeInfo(Test).@"struct".fields;
-
-    const t = Test{ .field = "bruh" };
-    const stdin = std.io.getStdIn().reader();
-    var buf: [1024]u8 = undefined;
-
-    const input = try stdin.readUntilDelimiterOrEof(&buf, '\n');
-
-    inline for (fields) |field| {
-        if (std.mem.eql(u8, input.?, field.name)) {
-            const val = @field(t, field.name);
-            std.debug.print("{s}\n", .{val});
-            break;
-        }
-    }
-}
