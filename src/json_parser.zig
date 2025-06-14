@@ -25,11 +25,18 @@ const Tokens = struct {
 
     const Self = @This();
 
-    pub fn append(self: *Self, char: u8, idx: usize) !void {
+    pub fn append(self: *Self, char: u8, index: usize) !void {
         if (self.len == max_tokens) return error.BufferOverflow;
         self.token_chars[self.len] = char;
-        self.token_idxes[self.len] = idx;
+        self.token_idxes[self.len] = index;
         self.len += 1;
+    }
+
+    pub fn get(self: *const Self, index: usize) struct { char: u8, index: usize } {
+        return .{
+            .char = self.token_chars[index],
+            .index = self.token_idxes[index],
+        };
     }
 };
 
@@ -110,29 +117,30 @@ test "simd" {
 
     var token_index: usize = 1;
     while (token_index < tokens.len - 1) {
-        if (tokens.token_chars[token_index] != '"') return error.InvalidJson;
-        const key_start_index = tokens.token_idxes[token_index] + 1;
-        if (tokens.token_chars[token_index + 1] != '"') return error.InvalidJson;
-        const key_end_index = tokens.token_idxes[token_index + 1];
+        const key_start = tokens.get(token_index);
+        if (key_start.char != '"') return error.InvalidJson;
+        const key_start_index = key_start.index + 1;
+        const key_end = tokens.get(token_index + 1);
+        if (key_end.char != '"') return error.InvalidJson;
 
         if (tokens.token_chars[token_index + 2] != ':') return error.InvalidJson;
 
-        const next_token = tokens.token_chars[token_index + 3];
-        switch (next_token) {
-            ',' => unreachable, //digit
+        const next_token = tokens.get(token_index + 3);
+        switch (next_token.char) {
+            ',' => unreachable, //digit or bool
             '[' => unreachable, //array
             '{' => unreachable, //json
             '"' => {
                 // string
-                const val_start_index = tokens.token_idxes[token_index + 3] + 1;
-                if (tokens.token_chars[token_index + 4] != '"') return error.InvalidJson;
-                const val_end_index = tokens.token_idxes[token_index + 4];
+                const val_start_index = next_token.index + 1;
+                const val_end = tokens.get(token_index + 4);
+                if (val_end.char != '"') return error.InvalidJson;
 
                 try deserialize_to_struct(
                     TestDeser,
                     &deser_struct,
-                    data[key_start_index..key_end_index],
-                    data[val_start_index..val_end_index],
+                    data[key_start_index..key_end.index],
+                    data[val_start_index..val_end.index],
                     .string,
                 );
 
