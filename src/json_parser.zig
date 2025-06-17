@@ -40,24 +40,17 @@ const Tokens = struct {
     }
 };
 
-const JSONTypes = enum {
-    string,
-    boolean,
-};
-
-fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: anytype, value_type: JSONTypes) !void {
+fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: anytype) !void {
     const fields = @typeInfo(T).@"struct".fields;
     inline for (fields) |field| {
         if (std.mem.eql(u8, key, field.name)) {
             switch (@typeInfo(field.type)) {
                 .bool => {
                     if (@TypeOf(value) != bool) unreachable;
-                    if (value_type != .boolean) return error.WrongValueType;
                     @field(target_struct, field.name) = value;
                 },
                 .@"struct" => |strct| {
                     if (@TypeOf(value) != []const u8) unreachable;
-                    if (value_type != .string) return error.WrongValueType;
                     const is_bounded_array = comptime blk: {
                         var buffer = false;
                         var len = false;
@@ -174,7 +167,6 @@ test "simd" {
                         &deser_struct,
                         data[key_start_index..key_end.index],
                         true,
-                        .boolean,
                     );
                 } else if (std.mem.eql(u8, data[next_token.index .. next_token.index + 5], "false")) {
                     try deserialize_to_struct(
@@ -182,7 +174,6 @@ test "simd" {
                         &deser_struct,
                         data[key_start_index..key_end.index],
                         false,
-                        .boolean,
                     );
                 } else {
                     return error.InvalidJson;
@@ -204,7 +195,6 @@ test "simd" {
                     &deser_struct,
                     data[key_start_index..key_end.index],
                     data[val_start_index..val_end.index],
-                    .string,
                 );
             },
             else => return error.InvalidJson,
