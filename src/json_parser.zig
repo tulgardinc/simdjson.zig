@@ -47,61 +47,49 @@ const JSONTypes = enum {
 
 fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: anytype, value_type: JSONTypes) !void {
     const fields = @typeInfo(T).@"struct".fields;
-    const type_kvs: [fields.len]std.meta.Tuple(&.{ []const u8, JSONTypes }) = comptime blk: {
-        var kvs: [fields.len]std.meta.Tuple(&.{ []const u8, JSONTypes }) = undefined;
-        for (fields, 0..) |field, i| {
-            switch (@typeInfo(field.type)) {
-                .bool => {
-                    kvs[i] = .{ field.name, .boolean };
-                },
-                .@"struct" => |strct| {
-                    // TODO: Should be more robust
-                    var buffer = false;
-                    var len = false;
-                    for (strct.fields) |inner_field| {
-                        switch (@typeInfo(inner_field.type)) {
-                            .array => {
-                                if (std.mem.eql(u8, inner_field.name, "buffer")) {
-                                    buffer = true;
-                                }
-                            },
-                            .int => {
-                                if (std.mem.eql(u8, inner_field.name, "len")) {
-                                    len = true;
-                                }
-                            },
-                            else => return error.UnrecognizedFieldType,
-                        }
-                    }
-                    if (buffer and len) {
-                        kvs[i] = .{ field.name, .string };
-                    } else {
-                        return error.UnrecognizedFieldType;
-                    }
-                },
-                else => return error.UnrecognizedFieldType,
-            }
-        }
-        break :blk kvs;
-    };
-    const type_map = std.StaticStringMap(JSONTypes).initComptime(type_kvs);
-
     inline for (fields) |field| {
         if (std.mem.eql(u8, key, field.name)) {
-            if (type_map.get(field.name) != value_type) {
-                return error.WrongValueType;
-            }
+            switch (@typeInfo(field.type)) {
+                .bool => {
+                    if (@TypeOf(value) != bool) unreachable;
+                    if (value_type != .boolean) return error.WrongValueType;
+                    @field(target_struct, field.name) = value;
+                },
+                .@"struct" => |strct| {
+                    if (@TypeOf(value) != []const u8) unreachable;
+                    if (value_type != .string) return error.WrongValueType;
+                    const is_bounded_array = comptime blk: {
+                        var buffer = false;
+                        var len = false;
+                        for (strct.fields) |inner_field| {
+                            switch (@typeInfo(inner_field.type)) {
+                                .array => {
+                                    if (std.mem.eql(u8, inner_field.name, "buffer")) {
+                                        buffer = true;
+                                    }
+                                },
+                                .int => {
+                                    if (std.mem.eql(u8, inner_field.name, "len")) {
+                                        len = true;
+                                    }
+                                },
+                                else => return error.UnrecognizedFieldType,
+                            }
+                        }
+                        break :blk buffer and len;
+                    };
+                    if (!is_bounded_array) {
+                        return error.UnrecognizedFieldType;
+                    }
 
-            if (value_type == .string) {
-                const slice: []const u8 = value;
-                if (@field(target_struct, field.name).buffer.len - @field(target_struct, field.name).len < slice.len) {
-                    return error.BufferOverflow;
-                }
+                    const slice: []const u8 = value;
+                    if (@field(target_struct, field.name).buffer.len - @field(target_struct, field.name).len < slice.len) {
+                        return error.BufferOverflow;
+                    }
 
-                try @field(target_struct, field.name).appendSlice(value);
-            } else if (value_type == .boolean) {
-                @field(target_struct, field.name) = value;
-                return;
+                    try @field(target_struct, field.name).appendSlice(value);
+                },
+                else => return error.UnrecognizedFieldType,
             }
             return;
         }
@@ -233,6 +221,10 @@ test "simd" {
     }
 
     inline for (@typeInfo(TestDeser).@"struct".fields) |field| {
-        std.debug.print("key: {s}, val: {s}\n", .{ field.name, @field(deser_struct, field.name).slice() });
+        if (@typeInfo(field.type) == .bool) {
+            std.debug.print("key: {s}, val: {}\n", .{ field.name, @field(deser_struct, field.name) });
+        } else {
+            std.debug.print("key: {s}, val: {s}\n", .{ field.name, @field(deser_struct, field.name).slice() });
+        }
     }
 }
