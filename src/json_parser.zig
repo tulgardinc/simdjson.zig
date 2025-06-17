@@ -3,15 +3,15 @@ const std = @import("std");
 const TestDeser = struct {
     key1: std.BoundedArray(u8, 64),
     key2: std.BoundedArray(u8, 64),
-    key3: std.BoundedArray(u8, 64),
-    key4: std.BoundedArray(u8, 64),
+    key3: bool,
+    key4: bool,
 
     pub fn init() !TestDeser {
         return .{
             .key1 = try .init(0),
             .key2 = try .init(0),
-            .key3 = try .init(0),
-            .key4 = try .init(0),
+            .key3 = false,
+            .key4 = false,
         };
     }
 };
@@ -42,23 +42,67 @@ const Tokens = struct {
 
 const JSONTypes = enum {
     string,
+    boolean,
 };
 
-fn deserialize_to_struct(T: type, strct: *T, key: []const u8, value: anytype, value_type: JSONTypes) !void {
+fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: anytype, value_type: JSONTypes) !void {
     const fields = @typeInfo(T).@"struct".fields;
+    const type_kvs: [fields.len]std.meta.Tuple(&.{ []const u8, JSONTypes }) = comptime blk: {
+        var kvs: [fields.len]std.meta.Tuple(&.{ []const u8, JSONTypes }) = undefined;
+        for (fields, 0..) |field, i| {
+            switch (@typeInfo(field.type)) {
+                .bool => {
+                    kvs[i] = .{ field.name, .boolean };
+                },
+                .@"struct" => |strct| {
+                    // TODO: Should be more robust
+                    var buffer = false;
+                    var len = false;
+                    for (strct.fields) |inner_field| {
+                        switch (@typeInfo(inner_field.type)) {
+                            .array => {
+                                if (std.mem.eql(u8, inner_field.name, "buffer")) {
+                                    buffer = true;
+                                }
+                            },
+                            .int => {
+                                if (std.mem.eql(u8, inner_field.name, "len")) {
+                                    len = true;
+                                }
+                            },
+                            else => return error.UnrecognizedFieldType,
+                        }
+                    }
+                    if (buffer and len) {
+                        kvs[i] = .{ field.name, .string };
+                    } else {
+                        return error.UnrecognizedFieldType;
+                    }
+                },
+                else => return error.UnrecognizedFieldType,
+            }
+        }
+        break :blk kvs;
+    };
+    const type_map = std.StaticStringMap(JSONTypes).initComptime(type_kvs);
 
     inline for (fields) |field| {
         if (std.mem.eql(u8, key, field.name)) {
-            if (value_type == .string) {
-                const slice: []const u8 = value;
-                if (@field(strct, field.name).buffer.len - @field(strct, field.name).len < slice.len) {
-                    return error.WrongValueType;
-                }
-
-                try @field(strct, field.name).appendSlice(value);
-                return;
+            if (type_map.get(field.name) != value_type) {
+                return error.WrongValueType;
             }
 
+            if (value_type == .string) {
+                const slice: []const u8 = value;
+                if (@field(target_struct, field.name).buffer.len - @field(target_struct, field.name).len < slice.len) {
+                    return error.BufferOverflow;
+                }
+
+                try @field(target_struct, field.name).appendSlice(value);
+            } else if (value_type == .boolean) {
+                @field(target_struct, field.name) = value;
+                return;
+            }
             return;
         }
     }
@@ -67,7 +111,7 @@ fn deserialize_to_struct(T: type, strct: *T, key: []const u8, value: anytype, va
 }
 
 test "simd" {
-    const data = "{\"key1\": \"val1\", \"key2\": \"val2\", \"key3\": \"val3\", \"key4\": \"val4\"}";
+    const data = "{\"key1\": \"val1\", \"key2\": \"val2\", \"key3\": true, \"key4\": false}";
 
     // len must be a power of 64 in prod and power of 8 here
     var buffer: [512]u8 = .{' '} ** 512;
@@ -84,7 +128,7 @@ test "simd" {
     var simd_index: usize = 0;
     while (simd_index < data.len) : (simd_index += chunk_len) {
         chunk_ptr = @ptrCast(@alignCast(buffer[simd_index .. simd_index + chunk_len]));
-        const token_chars = [_]u8{ ':', '"', ',', '{', '}' };
+        const token_chars = [_]u8{ ':', '"', ',', '{', '}', 't', 'f' };
 
         const ChunkInt = std.meta.Int(.unsigned, chunk_len);
 
@@ -120,21 +164,52 @@ test "simd" {
         const key_start = tokens.get(token_index);
         if (key_start.char != '"') return error.InvalidJson;
         const key_start_index = key_start.index + 1;
-        const key_end = tokens.get(token_index + 1);
-        if (key_end.char != '"') return error.InvalidJson;
+        var key_end_token_index = token_index + 1;
+        var key_end = tokens.get(key_end_token_index);
+        while (key_end.char != '"') {
+            key_end_token_index += 1;
+            if (key_end_token_index >= tokens.len) return error.InvalidJson;
+            key_end = tokens.get(key_end_token_index);
+        }
 
         if (tokens.token_chars[token_index + 2] != ':') return error.InvalidJson;
 
         const next_token = tokens.get(token_index + 3);
+        var value_end_token_index: usize = token_index + 3;
         switch (next_token.char) {
-            ',' => unreachable, //digit or bool
             '[' => unreachable, //array
             '{' => unreachable, //json
+            't', 'f' => {
+                if (std.mem.eql(u8, data[next_token.index .. next_token.index + 4], "true")) {
+                    try deserialize_to_struct(
+                        TestDeser,
+                        &deser_struct,
+                        data[key_start_index..key_end.index],
+                        true,
+                        .boolean,
+                    );
+                } else if (std.mem.eql(u8, data[next_token.index .. next_token.index + 5], "false")) {
+                    try deserialize_to_struct(
+                        TestDeser,
+                        &deser_struct,
+                        data[key_start_index..key_end.index],
+                        false,
+                        .boolean,
+                    );
+                } else {
+                    return error.InvalidJson;
+                }
+            },
             '"' => {
                 // string
                 const val_start_index = next_token.index + 1;
-                const val_end = tokens.get(token_index + 4);
-                if (val_end.char != '"') return error.InvalidJson;
+                value_end_token_index = token_index + 4;
+                const val_end = tokens.get(value_end_token_index);
+                while (val_end.char != '"') {
+                    value_end_token_index += 1;
+                    if (value_end_token_index >= tokens.len) return error.InvalidJson;
+                    key_end = tokens.get(value_end_token_index);
+                }
 
                 try deserialize_to_struct(
                     TestDeser,
@@ -143,15 +218,18 @@ test "simd" {
                     data[val_start_index..val_end.index],
                     .string,
                 );
-
-                if (tokens.token_chars[token_index + 5] == ',') {
-                    token_index += 6;
-                } else {
-                    token_index += 5;
-                }
             },
             else => return error.InvalidJson,
         }
+
+        if (tokens.get(value_end_token_index + 1).char == ',') {
+            if (tokens.get(value_end_token_index + 2).char != '"')
+                return error.InvalidJson;
+        } else if (tokens.get(value_end_token_index + 1).char != '}') {
+            return error.InvalidJson;
+        }
+
+        token_index = value_end_token_index + 2;
     }
 
     inline for (@typeInfo(TestDeser).@"struct".fields) |field| {
