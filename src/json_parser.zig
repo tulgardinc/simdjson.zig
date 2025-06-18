@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const TestDeser = struct {
-    key1: std.BoundedArray(u8, 64),
-    key2: std.BoundedArray(u8, 64),
+    key1: ?std.BoundedArray(u8, 64),
+    key2: ?std.BoundedArray(u8, 64),
     key3: bool,
     key4: bool,
 
@@ -44,10 +44,28 @@ fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: any
     const fields = @typeInfo(T).@"struct".fields;
     inline for (fields) |field| {
         if (std.mem.eql(u8, key, field.name)) {
-            switch (@typeInfo(field.type)) {
+            comptime var field_type_info = @typeInfo(field.type);
+
+            const field_ptr = blk: {
+                if (@typeInfo(field.type) == .optional) {
+                    break :blk &(@field(target_struct, field.name).?);
+                } else {
+                    break :blk &@field(target_struct, field.name);
+                }
+            };
+
+            if (field_type_info == .optional) {
+                if (@typeInfo(@TypeOf(value)) == .null) {
+                    @field(target_struct, field.name) = null;
+                    return;
+                }
+                field_type_info = @typeInfo(field_type_info.optional.child);
+            }
+
+            switch (field_type_info) {
                 .bool => {
                     if (@TypeOf(value) != bool) unreachable;
-                    @field(target_struct, field.name) = value;
+                    field_ptr.* = value;
                 },
                 .@"struct" => |strct| {
                     if (@TypeOf(value) != []const u8) unreachable;
@@ -76,13 +94,13 @@ fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: any
                     }
 
                     const slice: []const u8 = value;
-                    if (@field(target_struct, field.name).buffer.len - @field(target_struct, field.name).len < slice.len) {
+                    if (field_ptr.buffer.len - field_ptr.len < slice.len) {
                         return error.BufferOverflow;
                     }
 
-                    try @field(target_struct, field.name).appendSlice(value);
+                    try field_ptr.appendSlice(value);
                 },
-                else => return error.UnrecognizedFieldType,
+                else => @compileError("unrecognized field type " ++ std.fmt.comptimePrint("{}", .{field.type})),
             }
             return;
         }
@@ -92,7 +110,7 @@ fn deserialize_to_struct(T: type, target_struct: *T, key: []const u8, value: any
 }
 
 test "simd" {
-    const data = "{\"key1\": \"val1\", \"key2\": \"val2\", \"key3\": true, \"key4\": false}";
+    const data = "{\"key1\": \"val1\", \"key2\": null, \"key3\": true, \"key4\": false}";
 
     // len must be a power of 64 in prod and power of 8 here
     var buffer: [512]u8 = .{' '} ** 512;
@@ -109,7 +127,7 @@ test "simd" {
     var simd_index: usize = 0;
     while (simd_index < data.len) : (simd_index += chunk_len) {
         chunk_ptr = @ptrCast(@alignCast(buffer[simd_index .. simd_index + chunk_len]));
-        const token_chars = [_]u8{ ':', '"', ',', '{', '}', 't', 'f' };
+        const token_chars = [_]u8{ ':', '"', ',', '{', '}', 't', 'f', 'n', '-' };
 
         const ChunkInt = std.meta.Int(.unsigned, chunk_len);
 
@@ -160,25 +178,37 @@ test "simd" {
         switch (next_token.char) {
             '[' => unreachable, //array
             '{' => unreachable, //json
-            't', 'f' => {
-                if (std.mem.eql(u8, data[next_token.index .. next_token.index + 4], "true")) {
+            't' => {
+                if (std.mem.eql(u8, data[next_token.index + 1 .. next_token.index + 4], "rue")) {
                     try deserialize_to_struct(
                         TestDeser,
                         &deser_struct,
                         data[key_start_index..key_end.index],
                         true,
                     );
-                } else if (std.mem.eql(u8, data[next_token.index .. next_token.index + 5], "false")) {
+                }
+            },
+            'f' => {
+                if (std.mem.eql(u8, data[next_token.index + 1 .. next_token.index + 5], "alse")) {
                     try deserialize_to_struct(
                         TestDeser,
                         &deser_struct,
                         data[key_start_index..key_end.index],
                         false,
                     );
-                } else {
-                    return error.InvalidJson;
                 }
             },
+            'n' => {
+                if (std.mem.eql(u8, data[next_token.index + 1 .. next_token.index + 4], "ull")) {
+                    try deserialize_to_struct(
+                        TestDeser,
+                        &deser_struct,
+                        data[key_start_index..key_end.index],
+                        null,
+                    );
+                }
+            },
+            '-' => {},
             '"' => {
                 // string
                 const val_start_index = next_token.index + 1;
@@ -211,10 +241,25 @@ test "simd" {
     }
 
     inline for (@typeInfo(TestDeser).@"struct".fields) |field| {
-        if (@typeInfo(field.type) == .bool) {
-            std.debug.print("key: {s}, val: {}\n", .{ field.name, @field(deser_struct, field.name) });
-        } else {
-            std.debug.print("key: {s}, val: {s}\n", .{ field.name, @field(deser_struct, field.name).slice() });
-        }
+        print_field(TestDeser, deser_struct, field.name, @field(deser_struct, field.name));
+    }
+}
+
+fn print_field(T: type, deser_struct: T, field_name: []const u8, field_value: anytype) void {
+    switch (@typeInfo(@TypeOf(field_value))) {
+        .bool => {
+            std.debug.print("key: {s}, val: {}\n", .{ field_name, field_value });
+        },
+        .optional => {
+            if (field_value == null) {
+                std.debug.print("key: {s}, val: null\n", .{field_name});
+            } else {
+                print_field(T, deser_struct, field_name, field_value.?);
+            }
+        },
+        .@"struct" => {
+            std.debug.print("key: {s}, val: {s}\n", .{ field_name, field_value.slice() });
+        },
+        else => unreachable,
     }
 }
